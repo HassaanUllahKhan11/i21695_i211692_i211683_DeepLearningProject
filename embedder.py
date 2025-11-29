@@ -37,7 +37,16 @@ class LLMEmbedder:
         self.model_name = model_name or config.MODEL_NAME
         self.use_quantization = use_quantization if use_quantization is not None else config.USE_QUANTIZATION
         self.quantization_bits = quantization_bits or config.QUANTIZATION_BITS
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        # Force GPU if available
+        if device is None:
+            if torch.cuda.is_available():
+                self.device = 'cuda'
+                print(f"GPU available: {torch.cuda.get_device_name(0)}")
+            else:
+                self.device = 'cpu'
+                print("Warning: No GPU detected, using CPU (will be slow)")
+        else:
+            self.device = device
         
         # Get model path
         self.model_path = config.MODEL_PATH_MAP.get(self.model_name, self.model_name)
@@ -92,7 +101,15 @@ class LLMEmbedder:
                 trust_remote_code=True,
                 torch_dtype=torch.float16 if self.device == 'cuda' else torch.float32
             )
-            self.model = self.model.to(self.device)
+            if self.device == 'cuda':
+                self.model = self.model.to(self.device)
+                # Enable optimizations for faster inference
+                if hasattr(torch, 'compile'):
+                    try:
+                        self.model = torch.compile(self.model, mode='reduce-overhead')
+                        print("Model compiled with torch.compile for faster inference")
+                    except:
+                        pass
         
         self.model.eval()
         print(f"Model loaded successfully. Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
@@ -124,11 +141,11 @@ class LLMEmbedder:
         
         all_embeddings = []
         
-        # Process in batches
+        # Process in batches with optimized inference
         for i in tqdm(range(0, len(texts), batch_size), desc="Extracting embeddings"):
             batch_texts = texts[i:i + batch_size]
             
-            # Tokenize
+            # Tokenize (use fast tokenizer if available)
             encoded = self.tokenizer(
                 batch_texts,
                 padding=True,
@@ -138,15 +155,18 @@ class LLMEmbedder:
             )
             
             # Move to device
-            input_ids = encoded['input_ids'].to(self.device)
-            attention_mask = encoded['attention_mask'].to(self.device)
+            input_ids = encoded['input_ids'].to(self.device, non_blocking=True)
+            attention_mask = encoded['attention_mask'].to(self.device, non_blocking=True)
             
-            # Extract hidden states
+            # Extract hidden states with optimized settings
             with torch.no_grad():
+                if self.device == 'cuda':
+                    torch.cuda.synchronize()  # Ensure GPU is ready
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    output_hidden_states=True
+                    output_hidden_states=True,
+                    use_cache=False  # Disable cache for faster inference
                 )
             
             # Get hidden states (tuple of tensors, one per layer)
@@ -248,15 +268,18 @@ class LLMEmbedder:
                 return_tensors="pt"
             )
             
-            input_ids = encoded['input_ids'].to(self.device)
-            attention_mask = encoded['attention_mask'].to(self.device)
+            input_ids = encoded['input_ids'].to(self.device, non_blocking=True)
+            attention_mask = encoded['attention_mask'].to(self.device, non_blocking=True)
             
             # Extract hidden states
             with torch.no_grad():
+                if self.device == 'cuda':
+                    torch.cuda.synchronize()
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    output_hidden_states=True
+                    output_hidden_states=True,
+                    use_cache=False  # Disable cache for faster inference
                 )
             
             hidden_states = outputs.hidden_states
